@@ -1,0 +1,31 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: build-k8s-cluster
+spec:
+  workspaces:
+    - name: shared-data
+  tasks:
+    - name: create-kind-cluster
+      taskSpec:
+        workspaces:
+          - name: shared-data
+        steps:
+          - name: create-cluster
+            image: docker:24.0.7-cli # Docker image with kind and kubectl installed
+            script: |
+              #!/bin/sh
+              apk add --no-cache curl bash
+              curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
+              chmod +x ./kind && mv ./kind /usr/local/bin/kind
+
+              curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
+              chmod +x kubectl && mv kubectl /usr/local/bin/kubectl
+
+              kind create cluster --name tekton-demo
+
+              # Confirm cluster is up
+              kubectl cluster-info --context kind-tekton-demo
+      workspaces:
+        - name: shared-data
+          workspace: shared-data
