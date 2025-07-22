@@ -1,31 +1,63 @@
-apiVersion: tekton.dev/v1
-kind: Pipeline
-metadata:
-  name: build-k8s-cluster
-spec:
-  workspaces:
-    - name: shared-data
-  tasks:
-    - name: create-kind-cluster
-      taskSpec:
-        workspaces:
-          - name: shared-data
-        steps:
-          - name: create-cluster
-            image: docker:24.0.7-cli # Docker image with kind and kubectl installed
-            script: |
-              #!/bin/sh
-              apk add --no-cache curl bash
-              curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
-              chmod +x ./kind && mv ./kind /usr/local/bin/kind
+apiVersion: automation.cloudbees.io/v1alpha1
+kind: workflow
+name: Provision Kubernetes Cluster on AWS EKS
+on:
+  workflow_dispatch:
+permissions:
+  id-token: write
+  scm-token-org: read
+  scm-token-own: read
 
-              curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
-              chmod +x kubectl && mv kubectl /usr/local/bin/kubectl
+jobs:
+  terraform-create-eks:
+    steps:
+      - name: Checkout Terraform Code
+        uses: cloudbees-io/checkout@v1
 
-              kind create cluster --name tekton-demo
+      - name: Terraform Init
+        uses: docker://hashicorp/terraform:1.7.5
+        shell: sh
+        run: |
+          terraform -chdir=terraform/eks init
 
-              # Confirm cluster is up
-              kubectl cluster-info --context kind-tekton-demo
-      workspaces:
-        - name: shared-data
-          workspace: shared-data
+      - name: Terraform Validate
+        uses: docker://hashicorp/terraform:1.7.5
+        run: |
+          terraform -chdir=terraform/eks validate
+
+      - name: Terraform Plan
+        uses: docker://hashicorp/terraform:1.7.5
+        run: |
+          terraform -chdir=terraform/eks plan -out=tfplan
+
+      - name: Terraform Apply
+        uses: docker://hashicorp/terraform:1.7.5
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          terraform -chdir=terraform/eks apply -auto-approve
+
+      - name: Extract Terraform Outputs
+        id: outputs
+        uses: docker://hashicorp/terraform:1.7.5
+        run: |
+          terraform -chdir=terraform/eks output -json > tf-output.json
+          echo "KUBECONFIG=$(jq -r .kubeconfig.value tf-output.json)" >> $CLOUDBEES_OUTPUTS/KUBECONFIG
+          echo "CLUSTER_ENDPOINT=$(jq -r .cluster_endpoint.value tf-output.json)" >> $CLOUDBEES_OUTPUTS/CLUSTER_ENDPOINT
+
+      - name: Publish Evidence
+        uses: cloudbees-io/publish-evidence-item@v1
+        with:
+          content: |-
+            ## Kubernetes Cluster Created
+
+            ✅ EKS cluster has been provisioned using Terraform.
+
+            **Cluster Endpoint:** ${{ steps.outputs.outputs.CLUSTER_ENDPOINT }}
+
+            **Kubeconfig Extracted:** Yes
+
+            Run `kubectl get nodes` using the provided kubeconfig.
+          format: MARKDOWN
